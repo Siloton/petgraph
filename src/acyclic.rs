@@ -2,12 +2,10 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::{
-    cell::RefCell,
     cmp::Ordering,
     convert::TryFrom,
     ops::{Deref, RangeBounds},
 };
-
 use crate::{
     adj::IndexType,
     algo::Cycle,
@@ -28,6 +26,7 @@ use crate::stable_graph::StableDiGraph;
 
 mod order_map;
 use fixedbitset::FixedBitSet;
+use parking_lot::RwLock;
 use order_map::OrderMap;
 pub use order_map::TopologicalPosition;
 
@@ -64,7 +63,7 @@ pub use order_map::TopologicalPosition;
 /// that would create a cycle. The [`Build::add_edge`] on the other hand method
 /// will return `None` if the edge cannot be added (either it already exists on
 /// a graph type that does not support it or would create a cycle).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Acyclic<G: Visitable> {
     /// The underlying graph, accessible through the `inner` method.
     graph: G,
@@ -74,9 +73,20 @@ pub struct Acyclic<G: Visitable> {
     // We fix the internal DFS maps to FixedBitSet instead of G::VisitMap to do
     // faster resets (by just setting bits to false)
     /// Helper map for DFS tracking discovered nodes.
-    discovered: RefCell<FixedBitSet>,
+    discovered: RwLock<FixedBitSet>,
     /// Helper map for DFS tracking finished nodes.
-    finished: RefCell<FixedBitSet>,
+    finished: RwLock<FixedBitSet>,
+}
+
+impl<G> Clone for Acyclic<G> where G: Visitable + Clone {
+    fn clone(&self) -> Self {
+        Acyclic {
+            graph: self.graph.clone(),
+            order_map: self.order_map.clone(),
+            discovered: RwLock::new(self.discovered.read().clone()),
+            finished: RwLock::new(self.finished.read().clone()),
+        }
+    }
 }
 
 /// An error that can occur during edge addition for acyclic graphs.
@@ -149,8 +159,8 @@ where
     /// type bounds.
     pub fn try_from_graph(graph: G) -> Result<Self, Cycle<G::NodeId>> {
         let order_map = OrderMap::try_from_graph(&graph)?;
-        let discovered = RefCell::new(FixedBitSet::with_capacity(graph.node_bound()));
-        let finished = RefCell::new(FixedBitSet::with_capacity(graph.node_bound()));
+        let discovered = RwLock::new(FixedBitSet::with_capacity(graph.node_bound()));
+        let finished = RwLock::new(FixedBitSet::with_capacity(graph.node_bound()));
         Ok(Self {
             graph,
             order_map,
@@ -301,16 +311,16 @@ where
     where
         G::NodeId: IndexType,
     {
-        debug_assert!(self.discovered.borrow().is_clear());
-        debug_assert!(self.finished.borrow().is_clear());
+        debug_assert!(self.discovered.read().is_clear());
+        debug_assert!(self.finished.read().is_clear());
 
         let min_order = self.get_position(min_node);
         let max_order = self.get_position(max_node);
 
         // Prepare DFS scratch space: make sure the maps have enough capacity
-        if self.discovered.borrow().len() < self.graph.node_bound() {
-            self.discovered.borrow_mut().grow(self.graph.node_bound());
-            self.finished.borrow_mut().grow(self.graph.node_bound());
+        if self.discovered.read().len() < self.graph.node_bound() {
+            self.discovered.write().grow(self.graph.node_bound());
+            self.finished.write().grow(self.graph.node_bound());
         }
 
         // Get all nodes reachable from b with min_order <= order < max_order
@@ -337,11 +347,11 @@ where
         // Cleanup: reset map to 0. This is faster than a full reset, especially
         // on large sparse graphs.
         for &v in forward_cone.values().chain(backward_cone.values()) {
-            self.discovered.borrow_mut().set(v.index(), false);
-            self.finished.borrow_mut().set(v.index(), false);
+            self.discovered.write().set(v.index(), false);
+            self.finished.write().set(v.index(), false);
         }
-        debug_assert!(self.discovered.borrow().is_clear());
-        debug_assert!(self.finished.borrow().is_clear());
+        debug_assert!(self.discovered.read().is_clear());
+        debug_assert!(self.finished.read().is_clear());
 
         match success {
             Ok(()) => Ok((forward_cone, backward_cone)),
@@ -372,8 +382,8 @@ where
                 }
             },
             res,
-            &mut self.discovered.borrow_mut(),
-            &mut self.finished.borrow_mut(),
+            &mut self.discovered.write(),
+            &mut self.finished.write(),
         )
     }
 
@@ -400,8 +410,8 @@ where
                 }
             },
             res,
-            &mut self.discovered.borrow_mut(),
-            &mut self.finished.borrow_mut(),
+            &mut self.discovered.write(),
+            &mut self.finished.write(),
         )
     }
 }
@@ -415,8 +425,8 @@ impl<G: Default + Visitable> Default for Acyclic<G> {
     fn default() -> Self {
         let graph: G = Default::default();
         let order_map = Default::default();
-        let discovered = RefCell::new(FixedBitSet::default());
-        let finished = RefCell::new(FixedBitSet::default());
+        let discovered = RwLock::new(FixedBitSet::default());
+        let finished = RwLock::new(FixedBitSet::default());
         Self {
             graph,
             order_map,
@@ -475,8 +485,8 @@ where
         Self {
             graph,
             order_map,
-            discovered: RefCell::new(discovered),
-            finished: RefCell::new(finished),
+            discovered: RwLock::new(discovered),
+            finished: RwLock::new(finished),
         }
     }
 }
@@ -692,8 +702,8 @@ macro_rules! impl_graph_traits {
 
             fn try_from(graph: $graph_type<N, E, Ix>) -> Result<Self, Self::Error> {
                 let order_map = OrderMap::try_from_graph(&graph)?;
-                let discovered = RefCell::new(FixedBitSet::with_capacity(graph.node_bound()));
-                let finished = RefCell::new(FixedBitSet::with_capacity(graph.node_bound()));
+                let discovered = RwLock::new(FixedBitSet::with_capacity(graph.node_bound()));
+                let finished = RwLock::new(FixedBitSet::with_capacity(graph.node_bound()));
                 Ok(Self {
                     graph,
                     order_map,
